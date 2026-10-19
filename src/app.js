@@ -5,18 +5,35 @@ const connectDB = require("./config/db");
 
 const app = express();
 
-const PORT = 5000;
-const CLIENT_URL = "http://localhost:3000";
+// ==========================================
+// CORS CONFIGURATION
+// ==========================================
+
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://shurokkha-ai.vercel.app",
+];
 
 app.use(
   cors({
-    origin: CLIENT_URL,
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Origin not allowed by CORS"));
+    },
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 
 app.use(express.json({ limit: "1mb" }));
 
-// Database connection middleware
+// ==========================================
+// DATABASE CONNECTION MIDDLEWARE
+// ==========================================
+
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -31,7 +48,10 @@ app.use(async (req, res, next) => {
   }
 });
 
-// API home
+// ==========================================
+// HOME & HEALTH CHECK
+// ==========================================
+
 app.get("/", (req, res) => {
   res.status(200).json({
     success: true,
@@ -39,7 +59,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// Health check
 app.get("/api/health", (req, res) => {
   res.status(200).json({
     success: true,
@@ -54,7 +73,7 @@ app.get("/api/health", (req, res) => {
 // COMMUNITY REPORTS
 // ==========================================
 
-// Submit community report
+// Submit a community report
 app.post("/api/reports", async (req, res) => {
   try {
     const { category, title, description, location } = req.body;
@@ -66,13 +85,15 @@ app.post("/api/reports", async (req, res) => {
       });
     }
 
+    const now = new Date();
+
     const report = {
       category,
       title,
       description,
       location,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: now,
+      updatedAt: now,
     };
 
     const result = await mongoose.connection
@@ -121,7 +142,7 @@ app.get("/api/reports", async (req, res) => {
   }
 });
 
-// Delete community report
+// Delete a community report
 app.delete("/api/reports/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -162,13 +183,14 @@ app.delete("/api/reports/:id", async (req, res) => {
 // LIVE MAP
 // ==========================================
 
-// Create live location or update an existing tracking session
+// Create a tracking session or update an existing session
 app.post("/api/live-map", async (req, res) => {
   try {
     const { name, latitude, longitude, trackingId } = req.body;
 
     if (
-      !name ||
+      typeof name !== "string" ||
+      !name.trim() ||
       latitude === undefined ||
       longitude === undefined ||
       !Number.isFinite(Number(latitude)) ||
@@ -194,7 +216,7 @@ app.post("/api/live-map", async (req, res) => {
 
     const locationsCollection = mongoose.connection.collection("liveLocations");
 
-    // Update an existing tracking session
+    // Update an existing active tracking session
     if (trackingId) {
       if (!mongoose.isValidObjectId(trackingId)) {
         return res.status(400).json({
@@ -240,7 +262,7 @@ app.post("/api/live-map", async (req, res) => {
 
     // Create a new tracking session
     const newLocation = {
-      name,
+      name: name.trim(),
       status: "Active",
       currentLocation,
       locationHistory: [currentLocation],
@@ -259,7 +281,7 @@ app.post("/api/live-map", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Live map submit error:", error.message);
+    console.error("Live map submission error:", error.message);
 
     return res.status(500).json({
       success: false,
@@ -268,11 +290,10 @@ app.post("/api/live-map", async (req, res) => {
   }
 });
 
-// Get live locations
+// Get live location records
 app.get("/api/live-map", async (req, res) => {
   try {
     const { status } = req.query;
-
     const filter = {};
 
     if (status === "Active" || status === "Stopped") {
@@ -300,5 +321,8 @@ app.get("/api/live-map", async (req, res) => {
   }
 });
 
-// Export Express app for Vercel
+// ==========================================
+// EXPORT APP FOR VERCEL
+// ==========================================
+
 module.exports = app;
