@@ -1,17 +1,30 @@
 const mongoose = require("mongoose");
 
-const connectDB = async () => {
-  const mongoURI = process.env.MONGODB_URI;
+// MongoDB connection
+const MONGODB_URI =
+  "mongodb+srv://shurokkha_user:AfwoQV7IIl2UwjWd@cluster0.icnwzoy.mongodb.net/shurokkhaai?retryWrites=true&w=majority";
 
-  if (!mongoURI) {
-    throw new Error("MONGODB_URI is missing from environment variables");
+let connectionPromise = null;
+
+const connectDB = async () => {
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection;
   }
 
-  await mongoose.connect(mongoURI, {
-    serverSelectionTimeoutMS: 10000,
-  });
+  if (!connectionPromise) {
+    connectionPromise = mongoose
+      .connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 10000,
+        maxPoolSize: 10,
+      })
+      .catch((error) => {
+        connectionPromise = null;
+        throw error;
+      });
+  }
 
-  console.log("MongoDB connected successfully");
+  await connectionPromise;
+  return mongoose.connection;
 };
 
 module.exports = connectDB;

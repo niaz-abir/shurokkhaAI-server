@@ -1,18 +1,37 @@
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const connectDB = require("./config/db");
 
 const app = express();
 
+const PORT = 5000;
+const CLIENT_URL = "http://localhost:3000";
+
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:8000",
+    origin: CLIENT_URL,
   }),
 );
 
 app.use(express.json({ limit: "1mb" }));
 
-// Health check
+// Database connection middleware
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    console.error("Database connection error:", error.message);
+
+    return res.status(503).json({
+      success: false,
+      message: "Database connection unavailable.",
+    });
+  }
+});
+
+// API home
 app.get("/", (req, res) => {
   res.status(200).json({
     success: true,
@@ -20,27 +39,25 @@ app.get("/", (req, res) => {
   });
 });
 
+// Health check
 app.get("/api/health", (req, res) => {
   res.status(200).json({
     success: true,
     message: "Backend is healthy",
+    database:
+      mongoose.connection.readyState === 1 ? "connected" : "disconnected",
     timestamp: new Date().toISOString(),
   });
 });
 
-// Create Community Report
+// ==========================================
+// COMMUNITY REPORTS
+// ==========================================
+
+// Submit community report
 app.post("/api/reports", async (req, res) => {
   try {
-    const {
-      category,
-      title,
-      description,
-      location,
-      name,
-      email,
-      isAnonymous,
-      imageUrl,
-    } = req.body;
+    const { category, title, description, location } = req.body;
 
     if (!category || !title || !description || !location) {
       return res.status(400).json({
@@ -54,19 +71,13 @@ app.post("/api/reports", async (req, res) => {
       title,
       description,
       location,
-      name: isAnonymous ? null : name || null,
-      email: isAnonymous ? null : email || null,
-      isAnonymous: isAnonymous === true,
-      imageUrl: imageUrl || null,
-      status: "Pending",
       createdAt: new Date(),
+      updatedAt: new Date(),
     };
 
     const result = await mongoose.connection
       .collection("reports")
       .insertOne(report);
-
-    console.log("Community report created:", result.insertedId.toString());
 
     return res.status(201).json({
       success: true,
@@ -77,7 +88,7 @@ app.post("/api/reports", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Create community report error:", error.message);
+    console.error("Submit report error:", error.message);
 
     return res.status(500).json({
       success: false,
@@ -86,7 +97,7 @@ app.post("/api/reports", async (req, res) => {
   }
 });
 
-// Get All Community Reports
+// Get all community reports
 app.get("/api/reports", async (req, res) => {
   try {
     const reports = await mongoose.connection
@@ -101,7 +112,7 @@ app.get("/api/reports", async (req, res) => {
       data: reports,
     });
   } catch (error) {
-    console.error("Get community reports error:", error.message);
+    console.error("Fetch reports error:", error.message);
 
     return res.status(500).json({
       success: false,
@@ -110,12 +121,12 @@ app.get("/api/reports", async (req, res) => {
   }
 });
 
-// Delete Community Report
+// Delete community report
 app.delete("/api/reports/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid report ID.",
@@ -133,97 +144,87 @@ app.delete("/api/reports/:id", async (req, res) => {
       });
     }
 
-    console.log("Community report deleted:", id);
-
     return res.status(200).json({
       success: true,
-      message: "Community report deleted successfully.",
-      id,
+      message: "Report deleted successfully.",
     });
   } catch (error) {
-    console.error("Delete community report error:", error.message);
+    console.error("Delete report error:", error.message);
 
     return res.status(500).json({
       success: false,
-      message: "Failed to delete community report.",
+      message: "Failed to delete report.",
     });
   }
 });
 
 // ==========================================
-// LIVE MAP API 1: Create / Update Live Location
-// POST /api/live-map
+// LIVE MAP
 // ==========================================
+
+// Create live location or update an existing tracking session
 app.post("/api/live-map", async (req, res) => {
   try {
     const { name, latitude, longitude, trackingId } = req.body;
 
-    if (!name || typeof name !== "string" || !name.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Name is required.",
-      });
-    }
-
-    const lat = Number(latitude);
-    const lng = Number(longitude);
-
     if (
-      !Number.isFinite(lat) ||
-      !Number.isFinite(lng) ||
-      lat < -90 ||
-      lat > 90 ||
-      lng < -180 ||
-      lng > 180
+      !name ||
+      latitude === undefined ||
+      longitude === undefined ||
+      !Number.isFinite(Number(latitude)) ||
+      !Number.isFinite(Number(longitude)) ||
+      Number(latitude) < -90 ||
+      Number(latitude) > 90 ||
+      Number(longitude) < -180 ||
+      Number(longitude) > 180
     ) {
       return res.status(400).json({
         success: false,
-        message: "A valid latitude and longitude are required.",
+        message: "Valid name, latitude, and longitude are required.",
       });
     }
 
-    const collection = mongoose.connection.collection("liveLocations");
     const now = new Date();
 
-    // Existing tracking session: append a new location point.
+    const currentLocation = {
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      timestamp: now,
+    };
+
+    const locationsCollection = mongoose.connection.collection("liveLocations");
+
+    // Update an existing tracking session
     if (trackingId) {
-      if (!mongoose.Types.ObjectId.isValid(trackingId)) {
+      if (!mongoose.isValidObjectId(trackingId)) {
         return res.status(400).json({
           success: false,
           message: "Invalid tracking ID.",
         });
       }
 
-      const result = await collection.findOneAndUpdate(
+      const result = await locationsCollection.findOneAndUpdate(
         {
           _id: new mongoose.Types.ObjectId(trackingId),
           status: "Active",
         },
         {
           $set: {
-            currentLocation: {
-              latitude: lat,
-              longitude: lng,
-              updatedAt: now,
-            },
+            currentLocation,
             updatedAt: now,
           },
           $push: {
-            locationHistory: {
-              latitude: lat,
-              longitude: lng,
-              timestamp: now,
-            },
+            locationHistory: currentLocation,
           },
         },
-        { returnDocument: "after" },
+        {
+          returnDocument: "after",
+        },
       );
 
-      // Compatible with MongoDB driver versions returning either
-      // the document directly or a result object containing `value`.
-      const updatedRecord = result?.value ?? result;
+      const updatedLocation = result?.value ?? result;
 
-      if (!updatedRecord) {
+      if (!updatedLocation) {
         return res.status(404).json({
           success: false,
           message: "Active tracking session not found.",
@@ -232,43 +233,33 @@ app.post("/api/live-map", async (req, res) => {
 
       return res.status(200).json({
         success: true,
-        message: "Live location updated successfully.",
-        data: updatedRecord,
+        message: "Location updated successfully.",
+        data: updatedLocation,
       });
     }
 
-    // New tracking session.
-    const newTracking = {
-      name: name.trim(),
+    // Create a new tracking session
+    const newLocation = {
+      name,
       status: "Active",
-      currentLocation: {
-        latitude: lat,
-        longitude: lng,
-        updatedAt: now,
-      },
-      locationHistory: [
-        {
-          latitude: lat,
-          longitude: lng,
-          timestamp: now,
-        },
-      ],
+      currentLocation,
+      locationHistory: [currentLocation],
       createdAt: now,
       updatedAt: now,
     };
 
-    const result = await collection.insertOne(newTracking);
+    const result = await locationsCollection.insertOne(newLocation);
 
     return res.status(201).json({
       success: true,
-      message: "Live location tracking started successfully.",
+      message: "Live location tracking started.",
       data: {
         _id: result.insertedId,
-        ...newTracking,
+        ...newLocation,
       },
     });
   } catch (error) {
-    console.error("Live Map POST error:", error.message);
+    console.error("Live map submit error:", error.message);
 
     return res.status(500).json({
       success: false,
@@ -277,10 +268,7 @@ app.post("/api/live-map", async (req, res) => {
   }
 });
 
-// ==========================================
-// LIVE MAP API 2: Get Tracking Records
-// GET /api/live-map
-// ==========================================
+// Get live locations
 app.get("/api/live-map", async (req, res) => {
   try {
     const { status } = req.query;
@@ -291,7 +279,7 @@ app.get("/api/live-map", async (req, res) => {
       filter.status = status;
     }
 
-    const records = await mongoose.connection
+    const locations = await mongoose.connection
       .collection("liveLocations")
       .find(filter)
       .sort({ updatedAt: -1 })
@@ -299,17 +287,18 @@ app.get("/api/live-map", async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      count: records.length,
-      data: records,
+      count: locations.length,
+      data: locations,
     });
   } catch (error) {
-    console.error("Live Map GET error:", error.message);
+    console.error("Fetch live locations error:", error.message);
 
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch live location records.",
+      message: "Failed to fetch live locations.",
     });
   }
 });
 
+// Export Express app for Vercel
 module.exports = app;
