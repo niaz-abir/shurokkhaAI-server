@@ -5,75 +5,158 @@ const connectDB = require("./config/db");
 
 const app = express();
 
-// ==========================================
-// CORS CONFIGURATION
-// ==========================================
-
-const allowedOrigins = [
-  "http://localhost:3000",
-  "https://shurokkha-ai.vercel.app",
-];
-
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      return callback(new Error("Origin not allowed by CORS"));
-    },
-    methods: ["GET", "POST", "DELETE", "OPTIONS"],
+    origin: ["http://localhost:3000", "https://shurokkha-ai.vercel.app"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 
 app.use(express.json({ limit: "1mb" }));
 
-// ==========================================
-// DATABASE CONNECTION MIDDLEWARE
-// ==========================================
-
+// Connect MongoDB before handling API requests.
 app.use(async (req, res, next) => {
   try {
     await connectDB();
     next();
   } catch (error) {
-    console.error("Database connection error:", error.message);
-
-    return res.status(503).json({
+    console.error("Database connection error:", error);
+    res.status(503).json({
       success: false,
-      message: "Database connection unavailable.",
+      message: "Database connection failed",
     });
   }
 });
 
-// ==========================================
-// HOME & HEALTH CHECK
-// ==========================================
-
+// Health checks
 app.get("/", (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "ShurokkhaAI API is running",
-  });
+  res.json({ success: true, message: "ShurokkhaAI API is running" });
 });
 
 app.get("/api/health", (req, res) => {
-  res.status(200).json({
+  res.json({
     success: true,
-    message: "Backend is healthy",
-    database:
-      mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-    timestamp: new Date().toISOString(),
+    databaseState: mongoose.connection.readyState,
   });
 });
 
-// ==========================================
-// COMMUNITY REPORTS
-// ==========================================
+// MongoDB collections
+const reportsCollection = () => mongoose.connection.collection("reports");
 
-// Submit a community report
+const liveLocationsCollection = () =>
+  mongoose.connection.collection("liveLocations");
+
+const areaReportsCollection = () =>
+  mongoose.connection.collection("areaReports");
+
+// ObjectId validation helper
+const isValidObjectId = (id) =>
+  mongoose.Types.ObjectId.isValid(id) &&
+  String(new mongoose.Types.ObjectId(id)) === id;
+
+// Validate and normalize an area report.
+function validateAreaReport(body, partial = false) {
+  const fields = [
+    "name",
+    "safety",
+    "threats",
+    "resolved",
+    "active",
+    "risk",
+    "latitude",
+    "longitude",
+  ];
+
+  const data = {};
+
+  for (const field of fields) {
+    if (partial && body[field] === undefined) continue;
+    data[field] = body[field];
+  }
+
+  if (!partial) {
+    for (const field of fields) {
+      if (body[field] === undefined || body[field] === "") {
+        return { error: `${field} is required` };
+      }
+    }
+  }
+
+  if (
+    data.name !== undefined &&
+    (typeof data.name !== "string" || !data.name.trim())
+  ) {
+    return { error: "Area name must be a non-empty string" };
+  }
+
+  if (data.name !== undefined) {
+    data.name = data.name.trim();
+  }
+
+  if (
+    data.risk !== undefined &&
+    !["High", "Moderate", "Low"].includes(data.risk)
+  ) {
+    return { error: "Risk must be High, Moderate, or Low" };
+  }
+
+  const numericFields = [
+    "safety",
+    "threats",
+    "resolved",
+    "active",
+    "latitude",
+    "longitude",
+  ];
+
+  for (const field of numericFields) {
+    if (data[field] === undefined) continue;
+
+    const value = Number(data[field]);
+
+    if (!Number.isFinite(value)) {
+      return { error: `${field} must be a valid number` };
+    }
+
+    data[field] = value;
+  }
+
+  if (data.safety !== undefined && (data.safety < 0 || data.safety > 100)) {
+    return { error: "Safety must be between 0 and 100" };
+  }
+
+  for (const field of ["threats", "resolved", "active"]) {
+    if (
+      data[field] !== undefined &&
+      (!Number.isInteger(data[field]) || data[field] < 0)
+    ) {
+      return { error: `${field} must be a non-negative integer` };
+    }
+  }
+
+  if (
+    data.latitude !== undefined &&
+    (data.latitude < -90 || data.latitude > 90)
+  ) {
+    return { error: "Latitude must be between -90 and 90" };
+  }
+
+  if (
+    data.longitude !== undefined &&
+    (data.longitude < -180 || data.longitude > 180)
+  ) {
+    return { error: "Longitude must be between -180 and 180" };
+  }
+
+  return { data };
+}
+
+// =====================================================
+// COMMUNITY REPORTS — existing endpoints
+// =====================================================
+
+// Create community report
 app.post("/api/reports", async (req, res) => {
   try {
     const { category, title, description, location } = req.body;
@@ -81,39 +164,31 @@ app.post("/api/reports", async (req, res) => {
     if (!category || !title || !description || !location) {
       return res.status(400).json({
         success: false,
-        message: "Category, title, description, and location are required.",
+        message: "Category, title, description, and location are required",
       });
     }
-
-    const now = new Date();
 
     const report = {
       category,
       title,
       description,
       location,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     };
 
-    const result = await mongoose.connection
-      .collection("reports")
-      .insertOne(report);
+    const result = await reportsCollection().insertOne(report);
 
-    return res.status(201).json({
+    res.status(201).json({
       success: true,
-      message: "Community report submitted successfully.",
-      data: {
-        _id: result.insertedId,
-        ...report,
-      },
+      message: "Community report created successfully",
+      data: { _id: result.insertedId, ...report },
     });
   } catch (error) {
-    console.error("Submit report error:", error.message);
-
-    return res.status(500).json({
+    console.error("Create community report error:", error);
+    res.status(500).json({
       success: false,
-      message: "Failed to submit community report.",
+      message: "Failed to create community report",
     });
   }
 });
@@ -121,76 +196,68 @@ app.post("/api/reports", async (req, res) => {
 // Get all community reports
 app.get("/api/reports", async (req, res) => {
   try {
-    const reports = await mongoose.connection
-      .collection("reports")
+    const data = await reportsCollection()
       .find({})
       .sort({ createdAt: -1 })
       .toArray();
 
-    return res.status(200).json({
-      success: true,
-      count: reports.length,
-      data: reports,
-    });
+    res.json({ success: true, count: data.length, data });
   } catch (error) {
-    console.error("Fetch reports error:", error.message);
-
-    return res.status(500).json({
+    console.error("Get community reports error:", error);
+    res.status(500).json({
       success: false,
-      message: "Failed to fetch community reports.",
+      message: "Failed to fetch community reports",
     });
   }
 });
 
-// Delete a community report
+// Delete community report
 app.delete("/api/reports/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!mongoose.isValidObjectId(id)) {
+    if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid report ID.",
+        message: "Invalid report ID",
       });
     }
 
-    const result = await mongoose.connection.collection("reports").deleteOne({
+    const result = await reportsCollection().deleteOne({
       _id: new mongoose.Types.ObjectId(id),
     });
 
-    if (result.deletedCount === 0) {
+    if (!result.deletedCount) {
       return res.status(404).json({
         success: false,
-        message: "Report not found.",
+        message: "Community report not found",
       });
     }
 
-    return res.status(200).json({
+    res.json({
       success: true,
-      message: "Report deleted successfully.",
+      message: "Community report deleted successfully",
     });
   } catch (error) {
-    console.error("Delete report error:", error.message);
-
-    return res.status(500).json({
+    console.error("Delete community report error:", error);
+    res.status(500).json({
       success: false,
-      message: "Failed to delete report.",
+      message: "Failed to delete community report",
     });
   }
 });
 
-// ==========================================
-// LIVE MAP
-// ==========================================
+// =====================================================
+// LIVE MAP — existing endpoints
+// =====================================================
 
-// Create a tracking session or update an existing session
+// Create a live location session or update an active session
 app.post("/api/live-map", async (req, res) => {
   try {
     const { name, latitude, longitude, trackingId } = req.body;
 
     if (
-      typeof name !== "string" ||
-      !name.trim() ||
+      !name ||
       latitude === undefined ||
       longitude === undefined ||
       !Number.isFinite(Number(latitude)) ||
@@ -202,7 +269,7 @@ app.post("/api/live-map", async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Valid name, latitude, and longitude are required.",
+        message: "Valid name, latitude, and longitude are required",
       });
     }
 
@@ -214,54 +281,41 @@ app.post("/api/live-map", async (req, res) => {
       timestamp: now,
     };
 
-    const locationsCollection = mongoose.connection.collection("liveLocations");
-
-    // Update an existing active tracking session
     if (trackingId) {
-      if (!mongoose.isValidObjectId(trackingId)) {
+      if (!isValidObjectId(trackingId)) {
         return res.status(400).json({
           success: false,
-          message: "Invalid tracking ID.",
+          message: "Invalid tracking ID",
         });
       }
 
-      const result = await locationsCollection.findOneAndUpdate(
+      const result = await liveLocationsCollection().findOneAndUpdate(
         {
           _id: new mongoose.Types.ObjectId(trackingId),
           status: "Active",
         },
         {
-          $set: {
-            currentLocation,
-            updatedAt: now,
-          },
-          $push: {
-            locationHistory: currentLocation,
-          },
+          $set: { currentLocation, updatedAt: now },
+          $push: { locationHistory: currentLocation },
         },
-        {
-          returnDocument: "after",
-        },
+        { returnDocument: "after" },
       );
 
-      const updatedLocation = result?.value ?? result;
-
-      if (!updatedLocation) {
+      if (!result) {
         return res.status(404).json({
           success: false,
-          message: "Active tracking session not found.",
+          message: "Active tracking session not found",
         });
       }
 
-      return res.status(200).json({
+      return res.json({
         success: true,
-        message: "Location updated successfully.",
-        data: updatedLocation,
+        message: "Live location updated",
+        data: result,
       });
     }
 
-    // Create a new tracking session
-    const newLocation = {
+    const session = {
       name: name.trim(),
       status: "Active",
       currentLocation,
@@ -270,27 +324,23 @@ app.post("/api/live-map", async (req, res) => {
       updatedAt: now,
     };
 
-    const result = await locationsCollection.insertOne(newLocation);
+    const result = await liveLocationsCollection().insertOne(session);
 
-    return res.status(201).json({
+    res.status(201).json({
       success: true,
-      message: "Live location tracking started.",
-      data: {
-        _id: result.insertedId,
-        ...newLocation,
-      },
+      message: "Live location session created",
+      data: { _id: result.insertedId, ...session },
     });
   } catch (error) {
-    console.error("Live map submission error:", error.message);
-
-    return res.status(500).json({
+    console.error("Live map error:", error);
+    res.status(500).json({
       success: false,
-      message: "Failed to save live location.",
+      message: "Live map request failed",
     });
   }
 });
 
-// Get live location records
+// Get live location sessions
 app.get("/api/live-map", async (req, res) => {
   try {
     const { status } = req.query;
@@ -300,29 +350,201 @@ app.get("/api/live-map", async (req, res) => {
       filter.status = status;
     }
 
-    const locations = await mongoose.connection
-      .collection("liveLocations")
+    const data = await liveLocationsCollection()
       .find(filter)
       .sort({ updatedAt: -1 })
       .toArray();
 
-    return res.status(200).json({
-      success: true,
-      count: locations.length,
-      data: locations,
-    });
+    res.json({ success: true, count: data.length, data });
   } catch (error) {
-    console.error("Fetch live locations error:", error.message);
-
-    return res.status(500).json({
+    console.error("Get live map error:", error);
+    res.status(500).json({
       success: false,
-      message: "Failed to fetch live locations.",
+      message: "Failed to fetch live locations",
     });
   }
 });
 
-// ==========================================
-// EXPORT APP FOR VERCEL
-// ==========================================
+// =====================================================
+// AREA REPORTS — new full CRUD API
+// Base URL: /api/area-reports
+// =====================================================
+
+// POST: create an area report
+app.post("/api/area-reports", async (req, res) => {
+  try {
+    const { error, data } = validateAreaReport(req.body);
+
+    if (error) {
+      return res.status(400).json({ success: false, message: error });
+    }
+
+    const now = new Date();
+
+    const areaReport = {
+      ...data,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await areaReportsCollection().insertOne(areaReport);
+
+    console.log("New area report:", {
+      _id: result.insertedId,
+      ...areaReport,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Area report created successfully",
+      data: { _id: result.insertedId, ...areaReport },
+    });
+  } catch (error) {
+    console.error("Create area report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create area report",
+    });
+  }
+});
+
+// GET: fetch all area reports
+app.get("/api/area-reports", async (req, res) => {
+  try {
+    const data = await areaReportsCollection()
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ success: true, count: data.length, data });
+  } catch (error) {
+    console.error("Get area reports error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch area reports",
+    });
+  }
+});
+
+// GET: fetch one area report by ID
+app.get("/api/area-reports/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid area report ID",
+      });
+    }
+
+    const data = await areaReportsCollection().findOne({
+      _id: new mongoose.Types.ObjectId(id),
+    });
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: "Area report not found",
+      });
+    }
+
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error("Get area report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch area report",
+    });
+  }
+});
+
+// PUT: edit an area report
+app.put("/api/area-reports/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid area report ID",
+      });
+    }
+
+    const { error, data } = validateAreaReport(req.body, true);
+
+    if (error) {
+      return res.status(400).json({ success: false, message: error });
+    }
+
+    if (!Object.keys(data).length) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide at least one field to update",
+      });
+    }
+
+    const result = await areaReportsCollection().findOneAndUpdate(
+      { _id: new mongoose.Types.ObjectId(id) },
+      { $set: { ...data, updatedAt: new Date() } },
+      { returnDocument: "after" },
+    );
+
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        message: "Area report not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Area report updated successfully",
+      data: result,
+    });
+  } catch (error) {
+    console.error("Update area report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update area report",
+    });
+  }
+});
+
+// DELETE: delete an area report
+app.delete("/api/area-reports/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid area report ID",
+      });
+    }
+
+    const result = await areaReportsCollection().deleteOne({
+      _id: new mongoose.Types.ObjectId(id),
+    });
+
+    if (!result.deletedCount) {
+      return res.status(404).json({
+        success: false,
+        message: "Area report not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Area report deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete area report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete area report",
+    });
+  }
+});
 
 module.exports = app;
